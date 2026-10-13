@@ -1,0 +1,462 @@
+"use client";
+
+import { useState, type FormEvent } from "react";
+import {
+  analyzeMarket,
+  type AnalysisCandleRequest,
+  type AnalysisResponse,
+  type ProposedTradeRequest,
+} from "@/lib/analysis-api";
+
+interface CandleRow {
+  id: number;
+  timestamp: string;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+}
+
+interface TradeFields {
+  direction: string;
+  entry_price: string;
+  stop_loss_price: string;
+  take_profit_price: string;
+}
+
+const candleFields = [
+  ["timestamp", "Timestamp"],
+  ["open", "Open"],
+  ["high", "High"],
+  ["low", "Low"],
+  ["close", "Close"],
+  ["volume", "Volume"],
+] as const;
+
+function emptyCandle(id: number): CandleRow {
+  return {
+    id,
+    timestamp: "",
+    open: "",
+    high: "",
+    low: "",
+    close: "",
+    volume: "",
+  };
+}
+
+function isExactlyRepresentableInteger(value: string, number: number): boolean {
+  const match = /^([+-]?)(\d+)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(
+    value.trim(),
+  );
+  if (!match) {
+    return false;
+  }
+
+  const [, sign, whole, fraction = "", exponentText = "0"] = match;
+  const exponent = Number(exponentText);
+  let digits = `${whole}${fraction}`.replace(/^0+/, "");
+  if (digits === "") {
+    return number === 0;
+  }
+  if (!Number.isSafeInteger(exponent)) {
+    return false;
+  }
+
+  let scale = exponent - fraction.length;
+  while (digits.endsWith("0")) {
+    digits = digits.slice(0, -1);
+    scale += 1;
+  }
+  if (scale < 0) {
+    return false;
+  }
+
+  const exactInteger =
+    BigInt(`${sign}${digits}`) * BigInt(10) ** BigInt(scale);
+  return exactInteger === BigInt(number);
+}
+
+function numericInput(value: string, label: string): number {
+  if (value.trim() === "") {
+    throw new Error(`${label} is required.`);
+  }
+
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    throw new Error(`${label} must be a finite number.`);
+  }
+  if (
+    Number.isInteger(number) &&
+    !isExactlyRepresentableInteger(value, number)
+  ) {
+    throw new Error(
+      `${label} cannot be represented exactly in this browser.`,
+    );
+  }
+
+  return number;
+}
+
+function formatTimestamp(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function displayMetric(value: number | null): string {
+  return value === null ? "Not available" : String(value);
+}
+
+export default function AnalysisForm() {
+  const [candles, setCandles] = useState<CandleRow[]>([
+    emptyCandle(0),
+    emptyCandle(1),
+    emptyCandle(2),
+    emptyCandle(3),
+    emptyCandle(4),
+  ]);
+  const [nextCandleId, setNextCandleId] = useState(5);
+  const [trade, setTrade] = useState<TradeFields>({
+    direction: "",
+    entry_price: "",
+    stop_loss_price: "",
+    take_profit_price: "",
+  });
+  const [result, setResult] = useState<AnalysisResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  function updateCandle(
+    id: number,
+    field: keyof Omit<CandleRow, "id">,
+    value: string,
+  ) {
+    setCandles((current) =>
+      current.map((candle) =>
+        candle.id === id ? { ...candle, [field]: value } : candle,
+      ),
+    );
+  }
+
+  function addCandle() {
+    setCandles((current) => [...current, emptyCandle(nextCandleId)]);
+    setNextCandleId((current) => current + 1);
+  }
+
+  function removeCandle(id: number) {
+    setCandles((current) => current.filter((candle) => candle.id !== id));
+  }
+
+  function updateTrade(field: keyof TradeFields, value: string) {
+    setTrade((current) => ({ ...current, [field]: value }));
+  }
+
+  async function submitAnalysis(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setResult(null);
+
+    if (candles.length < 5) {
+      setError("Enter at least five candles to run an analysis.");
+      return;
+    }
+
+    let requestCandles: AnalysisCandleRequest[];
+    let tradeRequest: ProposedTradeRequest;
+    try {
+      requestCandles = candles.map((candle, index) => {
+        const date = new Date(candle.timestamp);
+        if (!candle.timestamp || Number.isNaN(date.getTime())) {
+          throw new Error(`Candle ${index + 1} needs a valid timestamp.`);
+        }
+
+        return {
+          timestamp: date.toISOString(),
+          open: numericInput(candle.open, `Candle ${index + 1} open`),
+          high: numericInput(candle.high, `Candle ${index + 1} high`),
+          low: numericInput(candle.low, `Candle ${index + 1} low`),
+          close: numericInput(candle.close, `Candle ${index + 1} close`),
+          volume: numericInput(candle.volume, `Candle ${index + 1} volume`),
+        };
+      });
+
+      tradeRequest = {};
+      if (trade.direction !== "") {
+        tradeRequest.direction = trade.direction;
+      }
+      for (const field of [
+        "entry_price",
+        "stop_loss_price",
+        "take_profit_price",
+      ] as const) {
+        if (trade[field].trim() !== "") {
+          tradeRequest[field] = numericInput(trade[field], field);
+        }
+      }
+    } catch (validationError) {
+      setError(
+        validationError instanceof Error
+          ? validationError.message
+          : "Check the entered candle and trade values.",
+      );
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const analysis = await analyzeMarket({
+        candles: requestCandles,
+        trade: tradeRequest,
+      });
+      setResult(analysis);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "The analysis request could not be completed.",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <section className="analysis-workspace" aria-labelledby="analysis-title">
+      <div className="section-heading">
+        <p className="eyebrow">Deterministic analysis</p>
+        <h2 id="analysis-title">Analyze candles and a proposed trade</h2>
+        <p className="section-intro">
+          Enter timestamped candle data and optional trade values. Candle
+          timestamps must be chronological; the service validates market data
+          and trade geometry.
+        </p>
+      </div>
+
+      <form className="analysis-form" onSubmit={submitAnalysis}>
+        <div className="form-section-heading">
+          <h3>Candles</h3>
+          <button
+            className="secondary-button"
+            disabled={isSubmitting}
+            onClick={addCandle}
+            type="button"
+          >
+            Add candle
+          </button>
+        </div>
+
+        <div className="candle-list">
+          {candles.map((candle, index) => (
+            <fieldset className="candle-row" key={candle.id}>
+              <legend>Candle {index + 1}</legend>
+              <div className="candle-fields">
+                {candleFields.map(([field, label]) => (
+                  <label
+                    className={field === "timestamp" ? "field-wide" : ""}
+                    key={field}
+                  >
+                    <span>{label}</span>
+                    <input
+                      autoComplete="off"
+                      name={`candle-${candle.id}-${field}`}
+                      onChange={(event) =>
+                        updateCandle(candle.id, field, event.target.value)
+                      }
+                      required
+                      step={field === "timestamp" ? undefined : "any"}
+                      type={field === "timestamp" ? "datetime-local" : "number"}
+                      value={candle[field]}
+                    />
+                  </label>
+                ))}
+              </div>
+              <button
+                aria-label={`Remove candle ${index + 1}`}
+                className="remove-button"
+                disabled={isSubmitting}
+                onClick={() => removeCandle(candle.id)}
+                type="button"
+              >
+                Remove
+              </button>
+            </fieldset>
+          ))}
+        </div>
+
+        <fieldset className="trade-section">
+          <legend>Proposed trade</legend>
+          <p className="field-hint">
+            Leave a value blank to let the API report its trade-validation
+            error.
+          </p>
+          <div className="trade-fields">
+            <label>
+              <span>Direction</span>
+              <select
+                name="direction"
+                onChange={(event) =>
+                  updateTrade("direction", event.target.value)
+                }
+                value={trade.direction}
+              >
+                <option value="">Not provided</option>
+                <option value="long">Long</option>
+                <option value="short">Short</option>
+              </select>
+            </label>
+            {(
+              [
+                ["entry_price", "Entry price"],
+                ["stop_loss_price", "Stop-loss price"],
+                ["take_profit_price", "Take-profit price"],
+              ] as const
+            ).map(([field, label]) => (
+              <label key={field}>
+                <span>{label}</span>
+                <input
+                  name={field}
+                  onChange={(event) =>
+                    updateTrade(field, event.target.value)
+                  }
+                  step="any"
+                  type="number"
+                  value={trade[field]}
+                />
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        {error && (
+          <p className="form-error" role="alert">
+            {error}
+          </p>
+        )}
+
+        <button
+          className="primary-button"
+          disabled={isSubmitting}
+          type="submit"
+        >
+          {isSubmitting ? "Analyzing…" : "Run analysis"}
+        </button>
+      </form>
+
+      {isSubmitting && (
+        <p className="loading-message" role="status">
+          Analysis is running…
+        </p>
+      )}
+
+      {result && (
+        <div className="analysis-results" aria-live="polite">
+          <section className="result-card" aria-labelledby="structure-title">
+            <h3 id="structure-title">Market structure</h3>
+            <p>
+              <strong>Trend:</strong> {result.market_structure.trend}
+            </p>
+            <h4>Swings</h4>
+            {result.market_structure.swings.length === 0 ? (
+              <p className="empty-result">No swings detected.</p>
+            ) : (
+              <ul className="result-list">
+                {result.market_structure.swings.map((swing, index) => (
+                  <li key={`${swing.kind}-${swing.index}-${index}`}>
+                    <strong>
+                      {swing.kind} {swing.label ? `(${swing.label})` : ""}
+                    </strong>
+                    {" — "}
+                    index {swing.index}, price {swing.price}; confirmed at
+                    index {swing.confirmed_at_index} (
+                    {formatTimestamp(swing.confirmed_at)})
+                  </li>
+                ))}
+              </ul>
+            )}
+            <h4>Events</h4>
+            {result.market_structure.events.length === 0 ? (
+              <p className="empty-result">No structure events.</p>
+            ) : (
+              <ul className="result-list">
+                {result.market_structure.events.map((event, index) => (
+                  <li key={`${event.kind}-${event.index}-${index}`}>
+                    <strong>{event.kind}</strong>
+                    {event.direction ? ` — ${event.direction}` : ""}
+                    {" — "}index {event.index}; level{" "}
+                    {event.level_price ?? "Not available"}; level index{" "}
+                    {event.level_index ?? "Not available"}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="result-card" aria-labelledby="sweeps-title">
+            <h3 id="sweeps-title">Liquidity sweeps</h3>
+            {result.liquidity_sweeps.length === 0 ? (
+              <p className="empty-result">No liquidity sweeps detected.</p>
+            ) : (
+              <ul className="result-list">
+                {result.liquidity_sweeps.map((sweep, index) => (
+                  <li key={`${sweep.index}-${sweep.swing_index}-${index}`}>
+                    <strong>{sweep.direction} sweep</strong>
+                    {" — "}candle {sweep.index} at{" "}
+                    {formatTimestamp(sweep.timestamp)}; {sweep.swing_kind} swing
+                    {` ${sweep.swing_index}`} at {sweep.swing_price}; penetration{" "}
+                    {sweep.penetration_price}; rejection close{" "}
+                    {sweep.rejection_close}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="result-card" aria-labelledby="validation-title">
+            <h3 id="validation-title">Proposed trade validation</h3>
+            <p>
+              <strong>Status:</strong>{" "}
+              {result.trade_validation.is_valid ? "Valid" : "Invalid"}
+            </p>
+            <dl className="metric-list">
+              <div>
+                <dt>Risk distance</dt>
+                <dd>{displayMetric(result.trade_validation.risk_distance)}</dd>
+              </div>
+              <div>
+                <dt>Reward distance</dt>
+                <dd>
+                  {displayMetric(result.trade_validation.reward_distance)}
+                </dd>
+              </div>
+              <div>
+                <dt>Reward-to-risk ratio</dt>
+                <dd>
+                  {displayMetric(
+                    result.trade_validation.reward_to_risk_ratio,
+                  )}
+                </dd>
+              </div>
+            </dl>
+            <h4>Validation errors</h4>
+            {result.trade_validation.errors.length === 0 ? (
+              <p className="empty-result">No validation errors.</p>
+            ) : (
+              <ul className="result-list">
+                {result.trade_validation.errors.map((item, index) => (
+                  <li key={`${item.field}-${item.code}-${index}`}>
+                    {item.field}: {item.code}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+          <p className="disclaimer">
+            This validates the submitted data only. It is not financial advice
+            or a recommendation, and no orders are placed.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}

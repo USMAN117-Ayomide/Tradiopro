@@ -1,4 +1,5 @@
 import Link from "next/link";
+import AnalysisForm from "@/components/analysis-form";
 
 export default function Home() {
   return (
@@ -10,7 +11,7 @@ export default function Home() {
           </span>
           Tradiopro
         </Link>
-        <span className="environment-label">Phase 1 foundation</span>
+        <span className="environment-label">Analysis workspace</span>
       </header>
 
       <section className="welcome" aria-labelledby="welcome-title">
@@ -26,8 +27,7 @@ export default function Home() {
           <div>
             <strong>Foundation is ready</strong>
             <p>
-              Market data, analysis, and account features will appear here as
-              they are added.
+              Enter candle data below to run the deterministic analysis API.
             </p>
           </div>
         </div>
@@ -37,6 +37,7 @@ export default function Home() {
           placed by this application.
         </p>
       </section>
+      <AnalysisForm />
     </main>
   );
 }
