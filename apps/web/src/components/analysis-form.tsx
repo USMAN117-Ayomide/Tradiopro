@@ -1,12 +1,21 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState, type ChangeEvent, type FormEvent } from "react";
 import {
-  analyzeMarket,
   type AnalysisCandleRequest,
   type AnalysisResponse,
   type ProposedTradeRequest,
 } from "@/lib/analysis-api";
+import {
+  analyzeSelectedCandles,
+  CsvImportController,
+  type CsvFileImport,
+} from "@/lib/analysis-workflow";
+import {
+  CSV_COLUMNS,
+  type CandleSource,
+  type CsvColumn,
+} from "@/lib/csv-candles";
 
 interface CandleRow {
   id: number;
@@ -108,6 +117,30 @@ function displayMetric(value: number | null): string {
   return value === null ? "Not available" : String(value);
 }
 
+function manualCandleRequests(
+  candles: CandleRow[],
+): AnalysisCandleRequest[] {
+  return candles.map((candle, index) => {
+    const date = new Date(candle.timestamp);
+    if (!candle.timestamp || Number.isNaN(date.getTime())) {
+      throw new Error(`Candle ${index + 1} needs a valid timestamp.`);
+    }
+
+    return {
+      timestamp: date.toISOString(),
+      open: numericInput(candle.open, `Candle ${index + 1} open`),
+      high: numericInput(candle.high, `Candle ${index + 1} high`),
+      low: numericInput(candle.low, `Candle ${index + 1} low`),
+      close: numericInput(candle.close, `Candle ${index + 1} close`),
+      volume: numericInput(candle.volume, `Candle ${index + 1} volume`),
+    };
+  });
+}
+
+function formatCsvColumn(column: CsvColumn | "header" | "record" | undefined) {
+  return column ? ` (${column})` : "";
+}
+
 export default function AnalysisForm() {
   const [candles, setCandles] = useState<CandleRow[]>([
     emptyCandle(0),
@@ -117,6 +150,11 @@ export default function AnalysisForm() {
     emptyCandle(4),
   ]);
   const [nextCandleId, setNextCandleId] = useState(5);
+  const [candleSource, setCandleSource] = useState<CandleSource>("manual");
+  const [csvImport, setCsvImport] = useState<CsvFileImport | null>(null);
+  const [isReadingCsv, setIsReadingCsv] = useState(false);
+  const [csvImportStatus, setCsvImportStatus] = useState("");
+  const [csvImportController] = useState(() => new CsvImportController());
   const [trade, setTrade] = useState<TradeFields>({
     direction: "",
     entry_price: "",
@@ -152,34 +190,64 @@ export default function AnalysisForm() {
     setTrade((current) => ({ ...current, [field]: value }));
   }
 
+  function handleCsvSelection(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) {
+      return;
+    }
+
+    setCandleSource("csv");
+    setCsvImport(null);
+    setCsvImportStatus(`Validating ${file.name}…`);
+    setError(null);
+    setResult(null);
+    void csvImportController.replace(file, (current, reading) => {
+      setCsvImport(current);
+      setIsReadingCsv(reading);
+      if (reading) {
+        setCsvImportStatus(`Validating ${file.name}…`);
+      } else if (current?.result?.valid) {
+        setCsvImportStatus(
+          `${current.filename} validated: ${current.result.candles.length} candles ready.`,
+        );
+      } else {
+        setCsvImportStatus(`${file.name} could not be imported.`);
+      }
+    });
+  }
+
+  function resetCsvImport() {
+    csvImportController.reset((current, reading) => {
+      setCsvImport(current);
+      setIsReadingCsv(reading);
+      setCsvImportStatus("");
+    });
+    setCandleSource("manual");
+    setError(null);
+    setResult(null);
+  }
+
+  function changeCandleSource(source: CandleSource) {
+    setCandleSource(source);
+    setError(null);
+    setResult(null);
+  }
+
   async function submitAnalysis(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
     setResult(null);
 
-    if (candles.length < 5) {
-      setError("Enter at least five candles to run an analysis.");
-      return;
-    }
-
-    let requestCandles: AnalysisCandleRequest[];
     let tradeRequest: ProposedTradeRequest;
+    let manualRequests: AnalysisCandleRequest[] = [];
     try {
-      requestCandles = candles.map((candle, index) => {
-        const date = new Date(candle.timestamp);
-        if (!candle.timestamp || Number.isNaN(date.getTime())) {
-          throw new Error(`Candle ${index + 1} needs a valid timestamp.`);
+      if (candleSource === "manual") {
+        if (candles.length < 5) {
+          throw new Error("Enter at least five candles to run an analysis.");
         }
-
-        return {
-          timestamp: date.toISOString(),
-          open: numericInput(candle.open, `Candle ${index + 1} open`),
-          high: numericInput(candle.high, `Candle ${index + 1} high`),
-          low: numericInput(candle.low, `Candle ${index + 1} low`),
-          close: numericInput(candle.close, `Candle ${index + 1} close`),
-          volume: numericInput(candle.volume, `Candle ${index + 1} volume`),
-        };
-      });
+        manualRequests = manualCandleRequests(candles);
+      }
 
       tradeRequest = {};
       if (trade.direction !== "") {
@@ -203,12 +271,24 @@ export default function AnalysisForm() {
       return;
     }
 
+    const currentImport = csvImportController.current;
+    const importedCandles =
+      currentImport?.result?.valid === true
+        ? currentImport.result.candles
+        : null;
+    if (candleSource === "csv" && isReadingCsv) {
+      setError("Wait for CSV validation to finish before running analysis.");
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      const analysis = await analyzeMarket({
-        candles: requestCandles,
-        trade: tradeRequest,
-      });
+      const analysis = await analyzeSelectedCandles(
+        candleSource,
+        manualRequests,
+        importedCandles,
+        tradeRequest,
+      );
       setResult(analysis);
     } catch (requestError) {
       setError(
@@ -234,55 +314,206 @@ export default function AnalysisForm() {
       </div>
 
       <form className="analysis-form" onSubmit={submitAnalysis}>
-        <div className="form-section-heading">
-          <h3>Candles</h3>
-          <button
-            className="secondary-button"
-            disabled={isSubmitting}
-            onClick={addCandle}
-            type="button"
-          >
-            Add candle
-          </button>
-        </div>
+        <fieldset className="source-selector">
+          <legend>Candle data source</legend>
+          <label>
+            <input
+              checked={candleSource === "manual"}
+              disabled={isSubmitting}
+              name="candle-source"
+              onChange={() => changeCandleSource("manual")}
+              type="radio"
+              value="manual"
+            />
+            <span>Manual entry</span>
+          </label>
+          <label>
+            <input
+              checked={candleSource === "csv"}
+              disabled={isSubmitting}
+              name="candle-source"
+              onChange={() => changeCandleSource("csv")}
+              type="radio"
+              value="csv"
+            />
+            <span>Import CSV</span>
+          </label>
+        </fieldset>
 
-        <div className="candle-list">
-          {candles.map((candle, index) => (
-            <fieldset className="candle-row" key={candle.id}>
-              <legend>Candle {index + 1}</legend>
-              <div className="candle-fields">
-                {candleFields.map(([field, label]) => (
-                  <label
-                    className={field === "timestamp" ? "field-wide" : ""}
-                    key={field}
-                  >
-                    <span>{label}</span>
-                    <input
-                      autoComplete="off"
-                      name={`candle-${candle.id}-${field}`}
-                      onChange={(event) =>
-                        updateCandle(candle.id, field, event.target.value)
-                      }
-                      required
-                      step={field === "timestamp" ? undefined : "any"}
-                      type={field === "timestamp" ? "datetime-local" : "number"}
-                      value={candle[field]}
-                    />
-                  </label>
-                ))}
-              </div>
+        {candleSource === "manual" ? (
+          <section aria-labelledby="manual-candles-heading">
+            <div className="form-section-heading">
+              <h3 id="manual-candles-heading">Manual candles</h3>
               <button
-                aria-label={`Remove candle ${index + 1}`}
-                className="remove-button"
+                className="secondary-button"
                 disabled={isSubmitting}
-                onClick={() => removeCandle(candle.id)}
+                onClick={addCandle}
                 type="button"
               >
-                Remove
+                Add candle
               </button>
-            </fieldset>
-          ))}
-        </div>
+            </div>
+
+            <div className="candle-list">
+              {candles.map((candle, index) => (
+                <fieldset className="candle-row" key={candle.id}>
+                  <legend>Candle {index + 1}</legend>
+                  <div className="candle-fields">
+                    {candleFields.map(([field, label]) => (
+                      <label
+                        className={field === "timestamp" ? "field-wide" : ""}
+                        key={field}
+                      >
+                        <span>{label}</span>
+                        <input
+                          autoComplete="off"
+                          name={`candle-${candle.id}-${field}`}
+                          onChange={(event) =>
+                            updateCandle(candle.id, field, event.target.value)
+                          }
+                          required
+                          step={field === "timestamp" ? undefined : "any"}
+                          type={
+                            field === "timestamp" ? "datetime-local" : "number"
+                          }
+                          value={candle[field]}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <button
+                    aria-label={`Remove candle ${index + 1}`}
+                    className="remove-button"
+                    disabled={isSubmitting}
+                    onClick={() => removeCandle(candle.id)}
+                    type="button"
+                  >
+                    Remove
+                  </button>
+                </fieldset>
+              ))}
+            </div>
+          </section>
+        ) : (
+          <section className="csv-import" aria-labelledby="csv-import-heading">
+            <h3 id="csv-import-heading">Import candle CSV</h3>
+            <p className="field-hint">
+              Choose a CSV with timestamp, open, high, low, close, and volume
+              columns. Maximum 2 MiB and 5,000 candles.
+            </p>
+            <label className="csv-file-label" htmlFor="candle-csv-file">
+              CSV file
+            </label>
+            <input
+              accept=".csv,text/csv"
+              disabled={isSubmitting}
+              id="candle-csv-file"
+              onChange={handleCsvSelection}
+              type="file"
+            />
+            {csvImport && (
+              <button
+                className="secondary-button"
+                disabled={isSubmitting}
+                onClick={resetCsvImport}
+                type="button"
+              >
+                Remove CSV and use manual entry
+              </button>
+            )}
+            {isReadingCsv && (
+              <p className="loading-message">
+                {csvImportStatus}
+              </p>
+            )}
+            <p className="sr-only" role="status" aria-live="polite">
+              {csvImportStatus}
+            </p>
+            {csvImport?.error && (
+              <p className="form-error" role="alert">
+                {csvImport.error}
+              </p>
+            )}
+            {csvImport?.result && !csvImport.result.valid && (
+              <div className="csv-errors" role="alert">
+                <p>
+                  {csvImport.filename} has validation errors. Correct the CSV
+                  and import it again.
+                </p>
+                <ul className="result-list">
+                  {csvImport.result.errors.map((item, index) => (
+                    <li key={`${item.line}-${item.column}-${index}`}>
+                      Line {item.line}
+                      {formatCsvColumn(item.column)}: {item.message}
+                    </li>
+                  ))}
+                </ul>
+                {csvImport.result.omittedErrorCount > 0 && (
+                  <p>
+                    {csvImport.result.omittedErrorCount} additional errors not
+                    shown.
+                  </p>
+                )}
+              </div>
+            )}
+            {csvImport?.result?.valid && (
+              <div className="csv-preview">
+                <h4>CSV preview</h4>
+                <dl className="csv-summary">
+                  <div>
+                    <dt>File</dt>
+                    <dd>{csvImport.filename}</dd>
+                  </div>
+                  <div>
+                    <dt>Candles</dt>
+                    <dd>{csvImport.result.candles.length}</dd>
+                  </div>
+                  <div>
+                    <dt>First timestamp</dt>
+                    <dd>{csvImport.result.candles[0].timestamp}</dd>
+                  </div>
+                  <div>
+                    <dt>Last timestamp</dt>
+                    <dd>
+                      {
+                        csvImport.result.candles[
+                          csvImport.result.candles.length - 1
+                        ].timestamp
+                      }
+                    </dd>
+                  </div>
+                </dl>
+                <div className="csv-table-scroll">
+                  <table>
+                    <caption>
+                      First{" "}
+                      {Math.min(5, csvImport.result.candles.length)} candles
+                      from {csvImport.filename}
+                    </caption>
+                    <thead>
+                      <tr>
+                        {CSV_COLUMNS.map((column) => (
+                          <th key={column} scope="col">
+                            {column}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {csvImport.result.candles.slice(0, 5).map((item, index) => (
+                        <tr key={`${item.timestamp}-${index}`}>
+                          {CSV_COLUMNS.map((column) => (
+                            <td key={column}>{item[column]}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
 
         <fieldset className="trade-section">
           <legend>Proposed trade</legend>

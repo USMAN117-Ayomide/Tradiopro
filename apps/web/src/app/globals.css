@@ -184,9 +184,144 @@ h1 {
 
 .form-section-heading h3,
 .trade-section legend,
-.result-card h3 {
+.result-card h3,
+.csv-import h3 {
   margin: 0;
   font-size: 1.1rem;
+}
+
+.source-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0 0 1.5rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.source-selector legend {
+  padding: 0 0.35rem;
+  font-weight: 700;
+}
+
+.source-selector label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 40px;
+  cursor: pointer;
+}
+
+.csv-import {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.csv-import h3 {
+  margin-bottom: 0.5rem;
+}
+
+.csv-file-label {
+  display: block;
+  margin-bottom: 0.4rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.csv-import input[type="file"] {
+  width: 100%;
+  min-height: 42px;
+  color: var(--text);
+  font: inherit;
+}
+
+.csv-import input[type="file"]::file-selector-button {
+  min-height: 40px;
+  margin-right: 0.75rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.csv-preview,
+.csv-errors {
+  margin-top: 1rem;
+}
+
+.csv-preview h4 {
+  margin: 0 0 0.7rem;
+  font-size: 0.95rem;
+}
+
+.csv-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+  margin: 0 0 1rem;
+}
+
+.csv-summary div {
+  min-width: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.csv-summary dt {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.csv-summary dd {
+  margin: 0.3rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.csv-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.csv-table-scroll table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+
+.csv-table-scroll caption {
+  padding: 0.5rem;
+  color: var(--muted);
+  text-align: left;
+}
+
+.csv-table-scroll th,
+.csv-table-scroll td {
+  padding: 0.55rem;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.csv-table-scroll th {
+  color: var(--accent);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .candle-list {
@@ -254,6 +389,8 @@ h1 {
 .candle-fields input:focus,
 .trade-fields input:focus,
 .trade-fields select:focus,
+.source-selector input:focus-visible,
+.csv-import input:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -395,7 +532,8 @@ button:disabled {
   }
 
   .trade-fields,
-  .metric-list {
+  .metric-list,
+  .csv-summary {
     grid-template-columns: 1fr;
   }
 
