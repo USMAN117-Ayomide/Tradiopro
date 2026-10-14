@@ -1,4 +1,10 @@
 import type { AnalysisCandleRequest } from "@/lib/analysis-api";
+import {
+  candleTimestampInstant,
+  MIN_CANDLE_COUNT,
+  parseCandleNumber,
+  validateCandleValues,
+} from "@/lib/candle-validation";
 
 export const CSV_MAX_FILE_BYTES = 2 * 1024 * 1024;
 export const CSV_MAX_DATA_ROWS = 5000;
@@ -48,54 +54,8 @@ interface CsvSyntaxError {
   message: string;
 }
 
-const decimalPattern =
-  /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 const timestampPattern =
   /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.(\d+))?(Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
-
-function exactlyRepresentsInteger(value: string, number: number): boolean {
-  const match = /^([+-]?)(\d+)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(value);
-  if (!match) {
-    return false;
-  }
-
-  const [, sign, whole, fraction = "", exponentText = "0"] = match;
-  const exponent = Number(exponentText);
-  let digits = `${whole}${fraction}`.replace(/^0+/, "");
-  if (digits === "") {
-    return number === 0;
-  }
-  if (!Number.isSafeInteger(exponent)) {
-    return false;
-  }
-
-  let scale = exponent - fraction.length;
-  while (digits.endsWith("0")) {
-    digits = digits.slice(0, -1);
-    scale += 1;
-  }
-  if (scale < 0) {
-    return false;
-  }
-
-  const exactInteger =
-    BigInt(`${sign}${digits}`) * BigInt(10) ** BigInt(scale);
-  return exactInteger === BigInt(number);
-}
-
-function parseDecimal(value: string): number | null {
-  if (!decimalPattern.test(value)) {
-    return null;
-  }
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    return null;
-  }
-  if (Number.isInteger(parsed) && !exactlyRepresentsInteger(value, parsed)) {
-    return null;
-  }
-  return parsed;
-}
 
 function parseTimestamp(value: string): string | null {
   const match = timestampPattern.exec(value);
@@ -351,7 +311,7 @@ export function parseCsvCandles(input: string): CsvImportResult {
 
     const numericValues = new Map<CsvColumn, number>();
     for (const column of ["open", "high", "low", "close", "volume"] as const) {
-      const parsed = parseDecimal(value(column));
+      const parsed = parseCandleNumber(value(column));
       if (parsed === null) {
         addError({
           line: record.line,
@@ -369,16 +329,6 @@ export function parseCsvCandles(input: string): CsvImportResult {
     const low = numericValues.get("low");
     const close = numericValues.get("close");
     const volume = numericValues.get("volume");
-    for (const column of ["open", "high", "low", "close"] as const) {
-      const price = numericValues.get(column);
-      if (price !== undefined && price <= 0) {
-        addError({
-          line: record.line,
-          column,
-          message: `${column[0].toUpperCase()}${column.slice(1)} price must be positive.`,
-        });
-      }
-    }
     if (
       open !== undefined &&
       high !== undefined &&
@@ -386,39 +336,19 @@ export function parseCsvCandles(input: string): CsvImportResult {
       close !== undefined &&
       volume !== undefined
     ) {
-      if (volume < 0) {
+      const candle = { timestamp: timestamp ?? "", open, high, low, close, volume };
+      for (const issue of validateCandleValues(candle, rowCount - 1)) {
         addError({
           line: record.line,
-          column: "volume",
-          message: "Volume cannot be negative.",
-        });
-      }
-      if (low > open || low > close) {
-        addError({
-          line: record.line,
-          column: "low",
-          message: "Low cannot exceed open or close.",
-        });
-      }
-      if (high < open || high < close) {
-        addError({
-          line: record.line,
-          column: "high",
-          message: "High cannot be below open or close.",
-        });
-      }
-      if (low > high) {
-        addError({
-          line: record.line,
-          column: "low",
-          message: "Low cannot exceed high.",
+          column: issue.field,
+          message: issue.message,
         });
       }
     }
 
     if (timestamp !== null) {
-      const currentTime = Date.parse(timestamp);
-      if (previousTimestamp !== null) {
+      const currentTime = candleTimestampInstant(timestamp);
+      if (currentTime !== null && previousTimestamp !== null) {
         if (currentTime === previousTimestamp) {
           addError({
             line: record.line,
@@ -433,7 +363,9 @@ export function parseCsvCandles(input: string): CsvImportResult {
           });
         }
       }
-      previousTimestamp = currentTime;
+      if (currentTime !== null) {
+        previousTimestamp = currentTime;
+      }
     }
 
     if (
@@ -465,7 +397,7 @@ export function parseCsvCandles(input: string): CsvImportResult {
     });
     return failure(errors, omittedErrorCount);
   }
-  if (rowCount < 5) {
+  if (rowCount < MIN_CANDLE_COUNT) {
     addError({
       line: 1,
       column: "record",

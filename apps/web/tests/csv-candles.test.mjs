@@ -7,23 +7,16 @@ import vm from "node:vm";
 import { TextEncoder } from "node:util";
 import ts from "typescript";
 
-const parserPath = path.resolve(process.cwd(), "src/lib/csv-candles.ts");
-const parserSource = fs.readFileSync(parserPath, "utf8");
-const compiled = ts.transpileModule(parserSource, {
-  compilerOptions: {
-    module: ts.ModuleKind.CommonJS,
-    target: ts.ScriptTarget.ES2022,
-  },
-}).outputText;
-const parserModule = { exports: {} };
-const parserContext = {
-  module: parserModule,
-  exports: parserModule.exports,
-  TextEncoder,
-};
-vm.runInNewContext(compiled, parserContext, { filename: parserPath });
+const validationModule = loadTypeScriptModule(
+  path.resolve(process.cwd(), "src/lib/candle-validation.ts"),
+);
+const parserModule = loadTypeScriptModule(
+  path.resolve(process.cwd(), "src/lib/csv-candles.ts"),
+  { "@/lib/candle-validation": validationModule },
+  { TextEncoder },
+);
 const { parseCsvCandles, CSV_MAX_DATA_ROWS, CSV_MAX_FILE_BYTES } =
-  parserModule.exports;
+  parserModule;
 
 function loadTypeScriptModule(filename, dependencies = {}, context = {}) {
   const source = fs.readFileSync(filename, "utf8");
@@ -67,9 +60,16 @@ const workflow = loadTypeScriptModule(
   path.resolve(process.cwd(), "src/lib/analysis-workflow.ts"),
   {
     "@/lib/analysis-api": api,
-    "@/lib/csv-candles": parserModule.exports,
+    "@/lib/csv-candles": parserModule,
+    "@/lib/candle-validation": validationModule,
   },
 );
+const {
+  candleTimestampInstant,
+  manualTimestampToUtc,
+  parseCandleNumber,
+  validateCandleSeries,
+} = validationModule;
 
 const tests = [];
 
@@ -86,6 +86,18 @@ function candle(
   { timestamp = isoMinute(index), open = "10", high = "12", low = "8", close = "10", volume = "100" } = {},
 ) {
   return [timestamp, open, high, low, close, volume];
+}
+
+function requestCandle(index, overrides = {}) {
+  return {
+    timestamp: isoMinute(index),
+    open: 10,
+    high: 12,
+    low: 8,
+    close: 10,
+    volume: 100,
+    ...overrides,
+  };
 }
 
 function csv(rows, { header = "timestamp,open,high,low,close,volume", newline = "\n", trailingNewline = false } = {}) {
@@ -335,6 +347,126 @@ test("invalid rows and malformed syntax never expose partial candles", () => {
   assert.equal(result.candles, null);
 });
 
+test("shared validation requires at least five candles", () => {
+  assert.match(
+    validateCandleSeries(Array.from({ length: 4 }, (_, index) => requestCandle(index)))[0].message,
+    /at least 5 candles/,
+  );
+});
+
+test("shared validation rejects duplicate and out-of-order instants", () => {
+  const duplicate = Array.from({ length: 5 }, (_, index) => requestCandle(index));
+  duplicate[2].timestamp = "2025-01-01T01:01:00+01:00";
+  assert.match(
+    validateCandleSeries(duplicate).find((issue) => issue.index === 2).message,
+    /duplicates/,
+  );
+
+  const unordered = Array.from({ length: 5 }, (_, index) => requestCandle(index));
+  unordered[3].timestamp = isoMinute(1);
+  assert.match(
+    validateCandleSeries(unordered).find((issue) => issue.index === 3).message,
+    /chronological/,
+  );
+});
+
+test("shared validation rejects invalid OHLC geometry and negative volume", () => {
+  for (const [field, value] of [["high", 9], ["low", 11], ["open", 0], ["close", -1], ["volume", -1]]) {
+    const candles = Array.from({ length: 5 }, (_, index) => requestCandle(index));
+    candles[2][field] = value;
+    assert.ok(validateCandleSeries(candles).some((issue) => issue.index === 2 && issue.field === field));
+  }
+  const zeroVolume = Array.from({ length: 5 }, (_, index) =>
+    requestCandle(index, index === 2 ? { volume: 0 } : {}),
+  );
+  assert.equal(validateCandleSeries(zeroVolume).length, 0);
+});
+
+test("shared numeric parsing rejects empty, non-finite, and inexact integers", () => {
+  for (const value of ["", " ", "NaN", "Infinity", "1e309", "9007199254740993"]) {
+    assert.equal(parseCandleNumber(value), null);
+  }
+});
+
+test("shared numeric parsing accepts fractional prices without rounding", () => {
+  assert.equal(parseCandleNumber("1.23456789"), 1.23456789);
+});
+
+test("shared validation compares actual timestamp instants", () => {
+  assert.equal(
+    candleTimestampInstant("2025-01-01T01:00:00+01:00"),
+    candleTimestampInstant("2025-01-01T00:00:00Z"),
+  );
+});
+
+test("shared validation accepts timestamp boundaries and supported precision", () => {
+  for (const timestamp of [
+    "2025-01-01T23:59:59Z",
+    "2025-01-01T23:59:59.123Z",
+    "2024-02-29T12:30:45.123+05:30",
+  ]) {
+    assert.notEqual(candleTimestampInstant(timestamp), null);
+  }
+});
+
+test("shared validation rejects out-of-range time and excess precision", () => {
+  for (const timestamp of [
+    "2025-01-01T24:00:00Z",
+    "2025-01-01T23:60:00Z",
+    "2025-01-01T23:59:60Z",
+    "2025-01-01T23:59:59.1234Z",
+    "2025-01-01T00:00:00+24:00",
+    "2025-01-01T00:00:00+01:60",
+  ]) {
+    assert.equal(candleTimestampInstant(timestamp), null, timestamp);
+  }
+});
+
+test("shared validation rejects impossible calendar dates", () => {
+  for (const timestamp of [
+    "2025-02-29T00:00:00Z",
+    "2025-02-30T00:00:00Z",
+    "0000-01-01T00:00:00Z",
+  ]) {
+    const candles = Array.from({ length: 5 }, (_, index) =>
+      requestCandle(index, index === 2 ? { timestamp } : {}),
+    );
+    assert.ok(
+      validateCandleSeries(candles).some(
+        (issue) => issue.index === 2 && issue.field === "timestamp",
+      ),
+    );
+  }
+
+  assert.equal(
+    candleTimestampInstant("2024-02-29T00:00:00Z"),
+    Date.parse("2024-02-29T00:00:00Z"),
+  );
+});
+
+test("manual datetime-local conversion retains browser-local interpretation", () => {
+  const localValue = "2025-06-15T12:34";
+  assert.equal(
+    manualTimestampToUtc(localValue),
+    new Date(localValue).toISOString(),
+  );
+});
+
+test("invalid manual candle series cannot issue an analysis request", async () => {
+  let requestCount = 0;
+  fetchHandler = async () => {
+    requestCount += 1;
+    throw new Error("Unexpected API call.");
+  };
+  const invalidManual = Array.from({ length: 5 }, (_, index) => requestCandle(index));
+  invalidManual[2].high = 9;
+  await assert.rejects(
+    workflow.analyzeSelectedCandles("manual", invalidManual, null, {}),
+    /Candle 3 \(high\)/,
+  );
+  assert.equal(requestCount, 0);
+});
+
 test("oversized files are rejected without reading their content", async () => {
   let readCount = 0;
   const result = await workflow.readCsvFile({
@@ -463,14 +595,7 @@ test("invalid CSV cannot issue an analysis request", async () => {
 });
 
 test("manual source submits only manual candles through the existing client", async () => {
-  const manual = [{
-    timestamp: isoMinute(0),
-    open: 10,
-    high: 12,
-    low: 8,
-    close: 10,
-    volume: 100,
-  }];
+  const manual = Array.from({ length: 5 }, (_, index) => requestCandle(index));
   let postedCandles;
   fetchHandler = async (_url, options) => {
     postedCandles = JSON.parse(options.body).candles;
@@ -492,7 +617,7 @@ test("manual source submits only manual candles through the existing client", as
     };
   };
   await workflow.analyzeSelectedCandles("manual", manual, [
-    { ...manual[0], timestamp: isoMinute(1) },
+    { ...manual[0], timestamp: isoMinute(5) },
   ], {});
   assert.deepEqual(postedCandles, manual);
 });

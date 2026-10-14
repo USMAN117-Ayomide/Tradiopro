@@ -16,6 +16,10 @@ import {
   type CandleSource,
   type CsvColumn,
 } from "@/lib/csv-candles";
+import {
+  manualTimestampToUtc,
+  parseCandleNumber,
+} from "@/lib/candle-validation";
 
 interface CandleRow {
   id: number;
@@ -55,56 +59,20 @@ function emptyCandle(id: number): CandleRow {
   };
 }
 
-function isExactlyRepresentableInteger(value: string, number: number): boolean {
-  const match = /^([+-]?)(\d+)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(
-    value.trim(),
-  );
-  if (!match) {
-    return false;
-  }
-
-  const [, sign, whole, fraction = "", exponentText = "0"] = match;
-  const exponent = Number(exponentText);
-  let digits = `${whole}${fraction}`.replace(/^0+/, "");
-  if (digits === "") {
-    return number === 0;
-  }
-  if (!Number.isSafeInteger(exponent)) {
-    return false;
-  }
-
-  let scale = exponent - fraction.length;
-  while (digits.endsWith("0")) {
-    digits = digits.slice(0, -1);
-    scale += 1;
-  }
-  if (scale < 0) {
-    return false;
-  }
-
-  const exactInteger =
-    BigInt(`${sign}${digits}`) * BigInt(10) ** BigInt(scale);
-  return exactInteger === BigInt(number);
-}
-
 function numericInput(value: string, label: string): number {
   if (value.trim() === "") {
     throw new Error(`${label} is required.`);
   }
 
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
+  const number = parseCandleNumber(value.trim());
+  if (number === null) {
+    if (Number.isInteger(Number(value.trim()))) {
+      throw new Error(
+        `${label} cannot be represented exactly in this browser.`,
+      );
+    }
     throw new Error(`${label} must be a finite number.`);
   }
-  if (
-    Number.isInteger(number) &&
-    !isExactlyRepresentableInteger(value, number)
-  ) {
-    throw new Error(
-      `${label} cannot be represented exactly in this browser.`,
-    );
-  }
-
   return number;
 }
 
@@ -121,13 +89,13 @@ function manualCandleRequests(
   candles: CandleRow[],
 ): AnalysisCandleRequest[] {
   return candles.map((candle, index) => {
-    const date = new Date(candle.timestamp);
-    if (!candle.timestamp || Number.isNaN(date.getTime())) {
+    const timestamp = manualTimestampToUtc(candle.timestamp);
+    if (timestamp === null) {
       throw new Error(`Candle ${index + 1} needs a valid timestamp.`);
     }
 
     return {
-      timestamp: date.toISOString(),
+      timestamp,
       open: numericInput(candle.open, `Candle ${index + 1} open`),
       high: numericInput(candle.high, `Candle ${index + 1} high`),
       low: numericInput(candle.low, `Candle ${index + 1} low`),

@@ -11,6 +11,10 @@ import {
   type CandleSource,
   type CsvImportResult,
 } from "@/lib/csv-candles";
+import {
+  formatCandleValidationIssue,
+  validateCandleSeries,
+} from "@/lib/candle-validation";
 
 export interface CsvFileLike {
   name: string;
@@ -93,5 +97,9 @@ export async function analyzeSelectedCandles(
     manualCandles,
     importedCandles,
   );
+  const issues = validateCandleSeries(candles);
+  if (issues.length > 0) {
+    throw new Error(formatCandleValidationIssue(issues[0]));
+  }
   return analyzeMarket({ candles, trade });
 }
