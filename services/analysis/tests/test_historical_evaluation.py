@@ -4,7 +4,7 @@ from tradiopro_analysis.market_structure import analyze_market_structure
 
 
 def test_historical_reference_cases_match_independent_expectations() -> None:
-    assert len(REFERENCE_CASES) == 1
+    assert len(REFERENCE_CASES) == 2
 
     for case in REFERENCE_CASES:
         analysis = analyze_market_structure(case.candles)
